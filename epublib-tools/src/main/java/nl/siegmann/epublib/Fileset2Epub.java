@@ -2,7 +2,13 @@ package nl.siegmann.epublib;
 
 import java.io.FileOutputStream;
 import java.io.OutputStream;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import javax.xml.parsers.ParserConfigurationException;
+import javax.xml.transform.TransformerConfigurationException;
+import javax.xml.xpath.XPathExpressionException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 import nl.siegmann.epublib.bookprocessor.CoverpageBookProcessor;
@@ -24,104 +30,136 @@ import org.apache.commons.lang.StringUtils;
 import org.apache.commons.vfs.FileSystemException;
 import org.apache.commons.vfs.VFS;
 
+import org.apache.commons.cli.*;
+import lombok.extern.slf4j.Slf4j;
+
+@Slf4j
 public class Fileset2Epub {
 
-	public static void main(String[] args) throws Exception {
-		String inputLocation = "";
-		String outLocation = "";
-		String xslFile = "";
-		String coverImage = "";
-		String title = "";
-		List<String> authorNames = new ArrayList<String>();
-		String type = "";
-		String isbn = "";
-		String inputEncoding = Constants.CHARACTER_ENCODING;
-		List<String> bookProcessorClassNames = new ArrayList<String>();
-		
-		for(int i = 0; i < args.length; i++) {
-			if(args[i].equalsIgnoreCase("--in")) {
-				inputLocation = args[++i];
-			} else if(args[i].equalsIgnoreCase("--out")) {
-				outLocation = args[++i];
-			} else if(args[i].equalsIgnoreCase("--input-encoding")) {
-				inputEncoding = args[++i];
-			} else if(args[i].equalsIgnoreCase("--xsl")) {
-				xslFile = args[++i];
-			} else if(args[i].equalsIgnoreCase("--book-processor-class")) {
-				bookProcessorClassNames.add(args[++i]);
-			} else if(args[i].equalsIgnoreCase("--cover-image")) {
-				coverImage = args[++i];
-			} else if(args[i].equalsIgnoreCase("--author")) {
-				authorNames.add(args[++i]);
-			} else if(args[i].equalsIgnoreCase("--title")) {
-				title = args[++i];
-			} else if(args[i].equalsIgnoreCase("--isbn")) {
-				isbn = args[++i];
-			} else if(args[i].equalsIgnoreCase("--type")) {
-				type = args[++i];
-			}
+	public static void main(String[] args) {
+		Options options = new Options();
+		options.addOption("in", true, "input location");
+		options.addOption("out", true, "output location");
+		options.addOption("input-encoding", true, "input encoding");
+		options.addOption("xsl", true, "xsl file");
+		options.addOption("book-processor-class", true, "book processor class");
+		options.addOption("cover-image", true, "cover image");
+		options.addOption("author", true, "author name");
+		options.addOption("title", true, "book title");
+		options.addOption("isbn", true, "book ISBN");
+		options.addOption("type", true, "book type");
+
+		CommandLineParser parser = new DefaultParser();
+		CommandLine cmd = null;
+		try {
+			cmd = parser.parse(options, args);
+		} catch (ParseException e) {
+			log.error("Invalid parameter(s) passed", e);
+			usage(options);
 		}
-		if(StringUtils.isBlank(inputLocation) || StringUtils.isBlank(outLocation)) {
-			usage();
+
+		final String inputLocation = cmd.getOptionValue("in", "");
+		final String outLocation = cmd.getOptionValue("out", "");
+		final String xslFile = cmd.getOptionValue("xsl", "");
+		final String coverImage = cmd.getOptionValue("cover-image", "");
+		final String title = cmd.getOptionValue("title", "");
+		final String type = cmd.getOptionValue("type", "");
+		final String isbn = cmd.getOptionValue("isbn", "");
+		String inputEncoding = cmd.getOptionValue("input-encoding", Constants.CHARACTER_ENCODING);
+		final List<String> authorNames = Arrays.asList(cmd.getOptionValues("author"));
+		final List<String> bookProcessorClassNames = Arrays.asList(cmd.getOptionValues("book-processor-class"));
+
+		if (StringUtils.isBlank(inputLocation) || StringUtils.isBlank(outLocation)) {
+			usage(options);
 		}
+
 		BookProcessorPipeline epubCleaner = new DefaultBookProcessorPipeline();
 		epubCleaner.addBookProcessors(createBookProcessors(bookProcessorClassNames));
 		EpubWriter epubWriter = new EpubWriter(epubCleaner);
-		if(! StringUtils.isBlank(xslFile)) {
-			epubCleaner.addBookProcessor(new XslBookProcessor(xslFile));
+		if (!StringUtils.isBlank(xslFile)) {
+			try {
+				epubCleaner.addBookProcessor(new XslBookProcessor(xslFile));
+			} catch (TransformerConfigurationException e) {
+				log.error("Error while parsing xls file '{}'", xslFile, e);
+				usage(options);
+			}
 		}
-		
+
 		if (StringUtils.isBlank(inputEncoding)) {
 			inputEncoding = Constants.CHARACTER_ENCODING;
 		}
-		
-		Book book;
-		if("chm".equals(type)) {
-			book = ChmParser.parseChm(VFSUtil.resolveFileObject(inputLocation), inputEncoding);
-		} else if ("epub".equals(type)) {
-			book = new EpubReader().readEpub(VFSUtil.resolveInputStream(inputLocation), inputEncoding);
-		} else {
-			book = FilesetBookCreator.createBookFromDirectory(VFSUtil.resolveFileObject(inputLocation), inputEncoding);
+
+		Book book = null;
+		try {
+			book = parseBookFromType(type, inputLocation, inputEncoding);
+		} catch (IOException | ParserConfigurationException | XPathExpressionException e) {
+			log.error("Error while parsing book from input location '{}'", inputLocation, e);
+			usage(options);
 		}
-		
-		if(StringUtils.isNotBlank(coverImage)) {
-//			book.getResourceByHref(book.getCoverImage());
-			book.setCoverImage(new Resource(VFSUtil.resolveInputStream(coverImage), coverImage));
+
+		if (StringUtils.isNotBlank(coverImage)) {
+			try {
+				book.setCoverImage(new Resource(VFSUtil.resolveInputStream(coverImage), coverImage));
+			} catch (IOException e) {
+				log.error("Error while resolving cover image file '{}'", coverImage, e);
+				usage(options);
+			}
 			epubCleaner.getBookProcessors().add(new CoverpageBookProcessor());
 		}
-		
-		if(StringUtils.isNotBlank(title)) {
-			List<String> titles = new ArrayList<String>();
+
+		if (StringUtils.isNotBlank(title)) {
+			List<String> titles = new ArrayList<>();
 			titles.add(title);
 			book.getMetadata().setTitles(titles);
 		}
-		
-		if(StringUtils.isNotBlank(isbn)) {
+
+		if (StringUtils.isNotBlank(isbn)) {
 			book.getMetadata().addIdentifier(new Identifier(Identifier.Scheme.ISBN, isbn));
 		}
-		
+
 		initAuthors(authorNames, book);
-		
-		OutputStream result;
+
 		try {
-			result = VFS.getManager().resolveFile(outLocation).getContent().getOutputStream();
-		} catch(FileSystemException e) {
-			result = new FileOutputStream(outLocation);
+			epubWriter.write(book, getOutputStreamFromPath(outLocation));
+		} catch (IOException e) {
+			log.error("Error while writing ebook file '{}'", outLocation, e);
+			usage(options);
 		}
-		epubWriter.write(book, result);
+		System.out.println("ebook conversion complete!");
+	}
+
+	private static Book parseBookFromType(String type, String inputLocation, String inputEncoding) 
+		throws FileNotFoundException, FileSystemException, IOException, ParserConfigurationException, XPathExpressionException {
+		switch (type) {
+			case "chm":
+				return ChmParser.parseChm(VFSUtil.resolveFileObject(inputLocation), inputEncoding);
+			case "epub":
+				return new EpubReader().readEpub(VFSUtil.resolveInputStream(inputLocation), inputEncoding);
+			default:
+				return FilesetBookCreator.createBookFromDirectory(VFSUtil.resolveFileObject(inputLocation),
+						inputEncoding);
+		}
+	}
+
+	private static OutputStream getOutputStreamFromPath(String outLocation) throws FileNotFoundException {
+		try {
+			return VFS.getManager().resolveFile(outLocation).getContent().getOutputStream();
+		} catch (FileSystemException e) {
+			return new FileOutputStream(outLocation);
+		}
 	}
 
 	private static void initAuthors(List<String> authorNames, Book book) {
-		if(authorNames == null || authorNames.isEmpty()) {
+		if (authorNames == null || authorNames.isEmpty()) {
 			return;
 		}
-		List<Author> authorObjects = new ArrayList<Author>();
-		for(String authorName: authorNames) {
+		List<Author> authorObjects = new ArrayList<>();
+		for (String authorName : authorNames) {
 			String[] authorNameParts = authorName.split(",");
 			Author authorObject = null;
-			if(authorNameParts.length > 1) {
+			if (authorNameParts.length > 1) {
 				authorObject = new Author(authorNameParts[1], authorNameParts[0]);
-			} else if(authorNameParts.length > 0) {
+			} else if (authorNameParts.length > 0) {
 				authorObject = new Author(authorNameParts[0]);
 			}
 			authorObjects.add(authorObject);
@@ -129,36 +167,24 @@ public class Fileset2Epub {
 		book.getMetadata().setAuthors(authorObjects);
 	}
 
-
 	private static List<BookProcessor> createBookProcessors(List<String> bookProcessorNames) {
-		List<BookProcessor> result = new ArrayList<BookProcessor>(bookProcessorNames.size());
-		for (String bookProcessorName: bookProcessorNames) {
+		List<BookProcessor> result = new ArrayList<>(bookProcessorNames.size());
+		for (String bookProcessorName : bookProcessorNames) {
 			BookProcessor bookProcessor = null;
 			try {
-				bookProcessor = (BookProcessor) Class.forName(bookProcessorName).newInstance();
+				bookProcessor = (BookProcessor) Class.forName(bookProcessorName).getDeclaredConstructor().newInstance();
 				result.add(bookProcessor);
 			} catch (Exception e) {
+				log.error("Error while initializing ebook processor '{}'", bookProcessorName, e);
 				e.printStackTrace();
 			}
 		}
 		return result;
 	}
-	
-	private static void usage() {
-		System.out.println("usage: " + Fileset2Epub.class.getName() 
-				+ "\n  --author [lastname,firstname]"
-				+ "\n  --cover-image [image to use as cover]"
-				+ "\n  --input-ecoding [text encoding]  # The encoding of the input html files. If funny characters show"
-				+ "\n                             # up in the result try 'iso-8859-1', 'windows-1252' or 'utf-8'"
-				+ "\n                             # If that doesn't work try to find an appropriate one from"
-				+ "\n                             # this list: http://en.wikipedia.org/wiki/Character_encoding"
-				+ "\n  --in [input directory]"
-				+ "\n  --isbn [isbn number]"
-				+ "\n  --out [output epub file]"
-				+ "\n  --title [book title]"
-				+ "\n  --type [input type, can be 'epub', 'chm' or empty]"
-				+ "\n  --xsl [html post processing file]"
-				);
-		System.exit(0);
+
+	private static void usage(Options options) {
+		HelpFormatter formatter = new HelpFormatter();
+		formatter.printHelp("Fileset2Epub", options);
+		System.exit(1);
 	}
 }
